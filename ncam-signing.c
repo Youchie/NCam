@@ -2,7 +2,7 @@
 
 #include "globals.h"
 #include "ncam-signing.h"
-#include "cscrypt/sha1.h"
+#include "cscrypt/sha256.h"
 #include "ncam-string.h"
 #include "ncam-time.h"
 #include "ncam-files.h"
@@ -10,7 +10,7 @@
 extern char *config_cert;
 struct o_sign_info osi;
 
-static char* _X509_NAME_oneline_utf8(const X509_NAME *name)
+static char* _X509_NAME_oneline_utf8(X509_NAME *name)
 {
 	BIO *bio_out = BIO_new(BIO_s_mem());
 	X509_NAME_print_ex(bio_out, name, 0, (ASN1_STRFLGS_RFC2253 | XN_FLAG_SEP_COMMA_PLUS | XN_FLAG_FN_SN | XN_FLAG_DUMP_UNKNOWN_FIELDS) & ~ASN1_STRFLGS_ESC_MSB);
@@ -349,10 +349,9 @@ static DIGEST hashBinary(const char *binfile, DIGEST *sign)
 	DIGEST arRetval = {NULL, 0};
 	struct stat *fi;
 	unsigned char *signature_enc;
-	size_t file_size = 0;
-	size_t offset = 0;
-	size_t signature_size = 0;
-	unsigned char *data = NULL, *ptr = NULL, *p = NULL;
+	size_t file_size, offset, end, signature_size;
+	file_size = offset = end = signature_size = 0;
+	unsigned char *data = NULL, *signature_start = NULL, *signature_end = NULL, *p = NULL;
 
 	if (cs_malloc(&fi, sizeof(struct stat)))
 	{
@@ -363,23 +362,32 @@ static DIGEST hashBinary(const char *binfile, DIGEST *sign)
 			// Read binary into memory
 			int fd = open(binfile, O_RDONLY);
 			data = mmap(0, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
+			end = file_size;
 
-			// Get last occurance of signature marker
+			// Determine occurrence of last signature marker
 			p = data;
 			while ((p = memmem(p, (file_size - offset), OBSM, cs_strlen(OBSM))))
 			{
 				offset = p - data;
 				p = p + cs_strlen(OBSM);
-				ptr = p;
+				signature_start = p;
 			}
+
+			// Determine occurrence of next upx marker
+			p = memmem(signature_start, (file_size - offset), UPXM, cs_strlen(UPXM));
+			if (p != NULL)
+			{
+				end = p - data;
+			}
+			signature_end = p;
 
 			// Get encrypted signature
 			if (offset > 0)
 			{
-				signature_size = file_size - offset - cs_strlen(OBSM);
+				signature_size = end - offset - cs_strlen(OBSM);
 				if (cs_malloc(&signature_enc, signature_size))
 				{
-					memcpy(signature_enc, ptr, signature_size);
+					memcpy(signature_enc, signature_start, signature_size);
 					sign->data = signature_enc;
 					sign->size = signature_size;
 				}
@@ -393,7 +401,8 @@ static DIGEST hashBinary(const char *binfile, DIGEST *sign)
 			mbedtls_sha256_context ctx;
 			mbedtls_sha256_init(&ctx);
 			mbedtls_sha256_starts(&ctx, 0);
-			mbedtls_sha256_update(&ctx, data, offset);
+			mbedtls_sha256_update(&ctx, data, offset); //first chunk from beginning to signature start
+			mbedtls_sha256_update(&ctx, signature_end, (file_size - end)); //second chunk from signature end to end of file
 			munmap(data, file_size);
 			close(fd);
 

@@ -1,12 +1,13 @@
-#ifndef Ncam_SIGNING_H_
-#define Ncam_SIGNING_H_
+#ifndef NCAM_SIGNING_H_
+#define NCAM_SIGNING_H_
 
 #ifdef WITH_SSL
 #include <openssl/x509.h>
 #include <openssl/pem.h>
 #endif
 
-#define OBSM "!OBSM!" //Ncam Binary Signature Marker
+#define OBSM "!OBSM!" //ncam Binary Signature Marker
+#define UPXM "UPX!" //UPX Marker
 #define CA_FILE_NAME "ca-certificates.crt" //System Certificate Trust Store Filename
 #define CA_SYSTEM_LOCATION "/etc/ssl/certs" //System Certificate Trust Store Location
 

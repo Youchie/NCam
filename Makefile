@@ -80,6 +80,8 @@ CC_OPTS = -Os -ggdb -pipe -ffunction-sections -fdata-sections
 CC = $(CROSS_DIR)$(CROSS)gcc
 STRIP = $(CROSS_DIR)$(CROSS)strip
 UPX = $(shell which upx 2>/dev/null || true)
+SSL = $(shell which openssl 2>/dev/null || true)
+
 ifeq "$(shell $(CC) -dumpmachine | cut -d'-' -f1 2>/dev/null)" "aarch64"
 LD = $(CROSS_DIR)$(CROSS)ld
 OBJCOPY = $(CROSS_DIR)$(CROSS)objcopy
@@ -95,13 +97,14 @@ ifdef USE_COMPRESS
 		override USE_COMPRESS =
 		UPX_COMMAND_NCAM = $(SAY) "UPX	Disabled due to missing upx binary in PATH!";
 	else
-		override STD_DEFS += -D'USE_COMPRESS="$(USE_COMPRESS)"' -D'COMP_LEVEL="$(COMP_LEVEL)"' -D'COMP_VERSION="$(UPX_VER)"'
-		UPX_INFO_TOOL = $(shell echo '|  UPX      = $(UPX)\n')
-		UPX_INFO = $(shell echo '|  Packer   : $(UPX_VER) (compression level $(COMP_LEVEL))\n')
-		UPX_COMMAND_NCAM = $(UPX) -q $(COMP_LEVEL) $(NCAM_BIN) | grep '^[[:space:]]*[[:digit:]]* ->' | xargs | cat | xargs -0 printf 'UPX \t%s'
+		UPX_SPLIT_PREFIX   = $(OBJDIR)/signing/upx.
+		UPX_INFO_TOOL      = $(shell echo '|  UPX      = $(UPX)\n')
+		UPX_INFO           = $(shell echo '|  Packer   : $(UPX_VER) (compression level $(COMP_LEVEL))\n')
+		UPX_COMMAND_NCAM  = $(UPX) -q $(COMP_LEVEL) $@ | grep '^[[:space:]]*[[:digit:]]* ->' | xargs | cat | xargs -0 printf 'UPX \t%s';
 	endif
 endif
 
+# Enable binary signing
 # Enable binary signing
 ifeq "$(shell ./config.sh --enabled WITH_SIGNING)" "Y"
 	SIGN_CERT   := $(shell ./config.sh --create-cert ecdsa prime256v1 ca 2>/dev/null || false)
@@ -115,22 +118,33 @@ ifeq "$(shell ./config.sh --enabled WITH_SIGNING)" "Y"
 
 		SIGN_PRIVKEY   = $(shell ./config.sh --cert-file privkey)
 		SIGN_MARKER    = $(shell ./config.sh --sign-marker)
+		SIGN_UPXMARKER = $(shell ./config.sh --upx-marker)
 		SIGN_PUBKEY    = $(OBJDIR)/signing/pkey
-		SIGN_HASH      = $(OBJDIR)/signing/sha1
-		SIGN_DIGEST    = $(OBJDIR)/signing/sha256
+		SIGN_HASH      = $(OBJDIR)/signing/sha256
+		SIGN_DIGEST    = $(OBJDIR)/signing/digest
 		SIGN_SUBJECT   = $(shell ./config.sh --cert-info | head -n 1)
 		SIGN_SIGALGO   = $(shell ./config.sh --cert-info | tail -n 1)
 		SIGN_VALID     = $(shell ./config.sh --cert-info | head -n 4 | tail -n 1)
 		SIGN_PUBALGO   = $(shell ./config.sh --cert-info | head -n 5 | tail -n 1)
 		SIGN_PUBBIT    = $(shell ./config.sh --cert-info | head -n 6 | tail -n 1)
-		SIGN_INFO      = $(shell echo '|  Signing  : $(SIGN_PUBALGO), $(SIGN_PUBBIT), $(SIGN_SIGALGO),\n|             Valid $(SIGN_VALID), $(SIGN_SUBJECT)\n')
-		SIGN_COMMAND_NCAM += sha1sum $@ | awk '{ print $$1 }' | tr -d '\n' > $(SIGN_HASH);
-		SIGN_COMMAND_NCAM += printf 'SIGN	SHA1('; stat -c %s $(SIGN_HASH) | tr -d '\n'; printf '): '; cat $(SIGN_HASH); printf ' -> ';
-		SIGN_COMMAND_NCAM += openssl x509 -pubkey -noout -in $(SIGN_CERT)         -out $(SIGN_PUBKEY);
-		SIGN_COMMAND_NCAM += openssl dgst -sha256      -sign $(SIGN_PRIVKEY)      -out $(SIGN_DIGEST) $(SIGN_HASH);
-		SIGN_COMMAND_NCAM += openssl dgst -sha256    -verify $(SIGN_PUBKEY) -signature $(SIGN_DIGEST) $(SIGN_HASH) | tr -d '\n';
+		SIGN_VER       = ${shell ($(SSL) version 2>/dev/null || echo "n.a.") | head -n 1 | awk -F'(' '{ print $$1 }' | xargs}
+		SIGN_INFO      = $(shell echo '|  Signing  : $(SIGN_VER)\n|             $(SIGN_PUBALGO), $(SIGN_PUBBIT), $(SIGN_SIGALGO),\n|             Valid $(SIGN_VALID), $(SIGN_SUBJECT)\n')
+		SIGN_INFO_TOOL = $(shell echo '|  SSL      = $(SSL)\n')
+		SIGN_COMMAND_NCAM += sha256sum $@ | awk '{ print $$1 }' | tr -d '\n' > $(SIGN_HASH);
+		SIGN_COMMAND_NCAM += printf 'SIGN	SHA256('; stat -c %s $(SIGN_HASH) | tr -d '\n'; printf '): '; cat $(SIGN_HASH); printf ' -> ';
+		SIGN_COMMAND_NCAM += $(SSL) x509 -pubkey -noout -in $(SIGN_CERT)         -out $(SIGN_PUBKEY);
+		SIGN_COMMAND_NCAM += $(SSL) dgst -sha256      -sign $(SIGN_PRIVKEY)      -out $(SIGN_DIGEST) $(SIGN_HASH);
+		SIGN_COMMAND_NCAM += $(SSL) dgst -sha256    -verify $(SIGN_PUBKEY) -signature $(SIGN_DIGEST) $(SIGN_HASH) | tr -d '\n';
+		SIGN_COMMAND_NCAM += [ -f $(UPX_SPLIT_PREFIX)aa ] && cat $(UPX_SPLIT_PREFIX)aa > $@;
 		SIGN_COMMAND_NCAM += printf '$(SIGN_MARKER)' | cat - $(SIGN_DIGEST) >> $@;
+		SIGN_COMMAND_NCAM += [ -f $(UPX_SPLIT_PREFIX)ab ] && cat $(UPX_SPLIT_PREFIX)ab >> $@;
 		SIGN_COMMAND_NCAM += printf ' <- DIGEST('; stat -c %s $(SIGN_DIGEST) | tr -d '\n'; printf ')\n';
+		ifdef USE_COMPRESS
+			ifneq ($(UPX_VER),n.a.)
+				SIGN_COMMAND_NCAM  += split --bytes=$$(grep -oba '$(SIGN_UPXMARKER)' $@ | tail -1 | awk -F':' '{ print $$1 }') $@ $(UPX_SPLIT_PREFIX);
+				SIGN_COMMAND_NCAM  += $(SIGN_COMMAND_NCAM)
+			endif
+		endif
 	endif
 endif
 
@@ -527,6 +541,7 @@ all:
 |  CC       = $(CC)\n\
 |  STRIP    = $(STRIP)\n\
 $(UPX_INFO_TOOL)\
+$(SIGN_INFO_TOOL)\
 | Settings:\n\
 |  CONF_DIR = $(CONF_DIR)\n\
 |  CC_OPTS  = $(strip $(CC_OPTS))\n\
@@ -561,7 +576,6 @@ $(NCAM_BIN): $(NCAM_BIN).debug
 	$(SAY) "STRIP	$@"
 	$(Q)cp $(NCAM_BIN).debug $(NCAM_BIN)
 	$(Q)$(STRIP) $(NCAM_BIN)
-	$(Q)$(UPX_COMMAND_NCAM)
 	$(Q)$(SIGN_COMMAND_NCAM)
 
 $(LIST_SMARGO_BIN): utils/list_smargo.c
